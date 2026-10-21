@@ -1,0 +1,680 @@
+import { createClient } from '@supabase/supabase-js';
+import { Client, CreditRequest, BureauQueryLog, RiskParameters, ClientPayment, ClientDossier, ContractTemplate, TermsConditions, Administrator } from './types';
+import { SecurityIncident } from './components/SecurityAuditModule';
+
+const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://ljtehieijrdsabmvjbcl.supabase.co';
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqdGVoaWVpanJkc2FibXZqYmNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMjQ3MTgsImV4cCI6MjA5NTkwMDcxOH0.bAiBHS2S_gaqRPovSs7b-89fr3c0xjZJ--k934dCP-o';
+
+// Initialize the Supabase client safely
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/**
+ * Checks if a table is accessible in Supabase by running a cheap SELECT query.
+ */
+async function checkTableAccessible(tableName: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from(tableName).select('id').limit(1);
+    if (error) {
+      if (error.code === '42P01' || error.code === 'PGRST125') {
+        // 42P01 is PostgreSQL undefined_table, PGRST125 is PostgREST invalid path (missing routes/tables)
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if the required tables exist in Supabase.
+ */
+export async function verifyTablesExist(): Promise<boolean> {
+  const essentialTables = ['clients', 'requests', 'queries', 'risk_params', 'security_alerts', 'client_payments', 'dossiers', 'system_notifications', 'contract_templates', 'terms_conditions'];
+  for (const table of essentialTables) {
+    const ok = await checkTableAccessible(table);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// ============================================================================
+// CLOUD RETRIEVAL AND SEEDING LOOPS
+// ============================================================================
+
+export async function fetchClientsCloud(): Promise<Client[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*')
+      .order('id', { ascending: true });
+    
+    if (error) {
+      console.warn('Error fetching clients from Supabase:', error);
+      return null;
+    }
+    return data as Client[];
+  } catch (err) {
+    console.error('Supabase fetchClients exception:', err);
+    return null;
+  }
+}
+
+function sanitizeClientForDb(client: Client) {
+  return {
+    id: client.id,
+    name: client.name,
+    rfc: client.rfc,
+    email: client.email,
+    phone: client.phone,
+    creditScore: client.creditScore,
+    bureauStatus: client.bureauStatus,
+    totalCreditGranted: client.totalCreditGranted,
+    balanceOwed: client.balanceOwed,
+    delinquencyDays: client.delinquencyDays,
+    category: client.category,
+    joinDate: client.joinDate,
+    membership: client.membership || 'Ninguna',
+    facebookProfile: client.facebookProfile || null,
+    locationLink: client.locationLink || null,
+    username: client.username || null,
+    password: client.password || null,
+    profileImage: client.profileImage || null,
+    active: client.active !== undefined ? client.active : true
+  };
+}
+
+function sanitizeRequestForDb(request: CreditRequest) {
+  return {
+    id: request.id,
+    clientName: request.clientName,
+    requestedAmount: request.requestedAmount,
+    purpose: request.purpose,
+    score: request.score,
+    category: request.category,
+    dateSubmitted: request.dateSubmitted,
+    status: request.status
+  };
+}
+
+function sanitizeDossierForDb(dossier: ClientDossier) {
+  return {
+    id: dossier.id,
+    clientName: dossier.clientName,
+    address: dossier.address,
+    birthDate: dossier.birthDate,
+    ineFront: dossier.ineFront,
+    ineBack: dossier.ineBack,
+    proofOfAddress: dossier.proofOfAddress,
+    requestedAmount: dossier.requestedAmount,
+    status: dossier.status,
+    createdAt: dossier.createdAt,
+    adminNotes: dossier.adminNotes || null,
+    notificationDismissed: dossier.notificationDismissed || false,
+    facebookProfile: dossier.facebookProfile || null,
+    locationLink: dossier.locationLink || null
+  };
+}
+
+export async function saveClientCloud(client: Client): Promise<boolean> {
+  try {
+    const cleanClient = sanitizeClientForDb(client);
+    const { error } = await supabase
+      .from('clients')
+      .upsert(cleanClient);
+    if (error) console.error('Error saving client to Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase exception saving client:', err);
+    return false;
+  }
+}
+
+export async function bulkInsertClientsCloud(clients: Client[]): Promise<boolean> {
+  try {
+    const cleanClients = clients.map(sanitizeClientForDb);
+    const { error } = await supabase
+      .from('clients')
+      .upsert(cleanClients);
+    if (error) console.error('Error bulk saving clients to Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase bulk clients save error:', err);
+    return false;
+  }
+}
+
+export async function fetchAdministratorsCloud(): Promise<Administrator[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('administrators')
+      .select('*')
+      .order('id', { ascending: true });
+    if (error) {
+      console.error('Error fetching administrators from Supabase:', error);
+      return null;
+    }
+    return data as Administrator[];
+  } catch (err) {
+    console.error('Supabase administrators fetch error:', err);
+    return null;
+  }
+}
+
+export async function saveAdministratorCloud(admin: Administrator): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('administrators')
+      .upsert(admin);
+    if (error) console.error('Error saving administrator to Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase administrator save error:', err);
+    return false;
+  }
+}
+
+export async function bulkInsertAdministratorsCloud(admins: Administrator[]): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('administrators')
+      .upsert(admins);
+    if (error) console.error('Error bulk saving administrators to Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase bulk administrators save error:', err);
+    return false;
+  }
+}
+
+
+// REQ
+export async function fetchRequestsCloud(): Promise<CreditRequest[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('requests')
+      .select('*')
+      .order('id', { ascending: true });
+    if (error) {
+      console.error('Error fetching requests from Supabase:', error);
+      return null;
+    }
+    return data as CreditRequest[];
+  } catch (err) {
+    console.error('Supabase fetchRequests exception:', err);
+    return null;
+  }
+}
+
+export async function saveRequestCloud(request: CreditRequest): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('requests')
+      .upsert(request);
+    if (error) {
+      console.warn('Error saving full request to Supabase. Attempting fallback sanitize:', error);
+      const { error: fallbackError } = await supabase
+        .from('requests')
+        .upsert(sanitizeRequestForDb(request));
+      if (fallbackError) {
+        console.error('Failed request save even with fallback sanitize:', fallbackError);
+        return false;
+      }
+      return true;
+    }
+    return true;
+  } catch (err) {
+    console.error('Supabase saveRequest exception:', err);
+    return false;
+  }
+}
+
+export async function bulkInsertRequestsCloud(reqs: CreditRequest[]): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('requests').upsert(reqs);
+    if (error) {
+      console.warn('Error bulk saving full requests to Supabase. Attempting fallback sanitize:', error);
+      const sanitized = reqs.map(sanitizeRequestForDb);
+      const { error: fallbackError } = await supabase
+        .from('requests')
+        .upsert(sanitized);
+      if (fallbackError) {
+        console.error('Failed bulk requests save even with fallback sanitize:', fallbackError);
+        return false;
+      }
+      return true;
+    }
+    return true;
+  } catch (err) {
+    console.error('Supabase bulkInsertRequests exception:', err);
+    return false;
+  }
+}
+
+// B_QUERIES
+export async function fetchQueriesCloud(): Promise<BureauQueryLog[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('queries')
+      .select('*')
+      .order('timestamp', { ascending: false });
+    if (error) return null;
+    return data as BureauQueryLog[];
+  } catch {
+    return null;
+  }
+}
+
+export async function saveQueryCloud(log: BureauQueryLog): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('queries')
+      .upsert(log);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function bulkInsertQueriesCloud(logs: BureauQueryLog[]): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('queries').upsert(logs);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// RISK PARAMS
+export async function fetchRiskParamsCloud(): Promise<RiskParameters | null> {
+  try {
+    const { data, error } = await supabase
+      .from('risk_params')
+      .select('*')
+      .limit(1);
+    if (error || !data || data.length === 0) return null;
+    return data[0] as RiskParameters;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRiskParamsCloud(params: RiskParameters): Promise<boolean> {
+  try {
+    // Since there's one parameters record, we use a constant ID or single row override representation
+    const payload = {
+      id: 'PARAMS_SINGLETON',
+      minScoreAutoApproval: params.minScoreAutoApproval,
+      maxDelinquencyDaysAllowed: params.maxDelinquencyDaysAllowed,
+      baseInterestRate: params.baseInterestRate
+    };
+    const { error } = await supabase
+      .from('risk_params')
+      .upsert(payload);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// ALERTS
+export async function fetchSecurityAlertsCloud(): Promise<SecurityIncident[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('security_alerts')
+      .select('*')
+      .order('timestamp', { ascending: false });
+    if (error) return null;
+    return data as SecurityIncident[];
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSecurityAlertCloud(incident: SecurityIncident): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('security_alerts')
+      .upsert(incident);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function bulkInsertSecurityAlertsCloud(alerts: SecurityIncident[]): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('security_alerts').upsert(alerts);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearSecurityAlertsCloud(): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('security_alerts')
+      .delete()
+      .not('id', 'is', null); // Delete all Rows
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearAllDatabaseTablesCloud(): Promise<boolean> {
+  try {
+    const tables = [
+      'clients',
+      'requests',
+      'queries',
+      'security_alerts',
+      'client_payments',
+      'dossiers',
+      'system_notifications'
+    ];
+    for (const table of tables) {
+      const { error } = await supabase
+        .from(table)
+        .delete()
+        .not('id', 'is', null);
+      if (error) {
+        console.warn(`Error clearing table ${table} in Supabase:`, error);
+      }
+    }
+    return true;
+  } catch (err) {
+    console.error('Exception clearing all tables in Supabase:', err);
+    return false;
+  }
+}
+
+// PAYMENTS
+export async function fetchPaymentsCloud(): Promise<ClientPayment[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('client_payments')
+      .select('*')
+      .order('date', { ascending: false });
+    if (error) return null;
+    return data as ClientPayment[];
+  } catch {
+    return null;
+  }
+}
+
+export async function savePaymentCloud(payment: ClientPayment): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('client_payments')
+      .upsert(payment);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function bulkInsertPaymentsCloud(payments: ClientPayment[]): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('client_payments').upsert(payments);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// DOSSIERS (EXPEDIENTES)
+export async function fetchDossiersCloud(): Promise<ClientDossier[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('dossiers')
+      .select('*')
+      .order('createdAt', { ascending: false });
+    if (error) {
+      console.warn('Error fetching dossiers from Supabase:', error);
+      return null;
+    }
+    return data as ClientDossier[];
+  } catch (err) {
+    console.error('Supabase fetchDossiers exception:', err);
+    return null;
+  }
+}
+
+export async function saveDossierCloud(dossier: ClientDossier): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('dossiers')
+      .upsert(dossier);
+    if (error) {
+      console.warn('Error saving full dossier to Supabase. Attempting fallback sanitize:', error);
+      const { error: fallbackError } = await supabase
+        .from('dossiers')
+        .upsert(sanitizeDossierForDb(dossier));
+      if (fallbackError) {
+        console.error('Failed dossier save even with fallback sanitize:', fallbackError);
+        return false;
+      }
+      return true;
+    }
+    return true;
+  } catch (err) {
+    console.error('Supabase exception saving dossier:', err);
+    return false;
+  }
+}
+
+export async function bulkInsertDossiersCloud(dossiers: ClientDossier[]): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('dossiers')
+      .upsert(dossiers);
+    if (error) {
+      console.warn('Error bulk saving full dossiers in Supabase. Attempting fallback sanitize:', error);
+      const sanitized = dossiers.map(sanitizeDossierForDb);
+      const { error: fallbackError } = await supabase
+        .from('dossiers')
+        .upsert(sanitized);
+      if (fallbackError) {
+        console.error('Failed bulk dossiers save even with fallback sanitize:', fallbackError);
+        return false;
+      }
+      return true;
+    }
+    return true;
+  } catch (err) {
+    console.error('Supabase exception bulk saving dossiers:', err);
+    return false;
+  }
+}
+
+// SYSTEM NOTIFICATIONS
+export interface DbSystemNotification {
+  id: string;
+  title: string;
+  message: string;
+  type: string;
+  targetRoles: string;
+  timestamp: string;
+  readBy: string;
+  soundPlayed: boolean;
+}
+
+export async function fetchSystemNotificationsCloud(): Promise<DbSystemNotification[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('system_notifications')
+      .select('*')
+      .order('timestamp', { ascending: false });
+    if (error) {
+      console.warn('Error fetching notifications from Supabase:', error);
+      return null;
+    }
+    return data as DbSystemNotification[];
+  } catch (err) {
+    console.error('Supabase fetchSystemNotifications exception:', err);
+    return null;
+  }
+}
+
+export async function bulkInsertSystemNotificationsCloud(notifications: DbSystemNotification[]): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('system_notifications')
+      .upsert(notifications);
+    if (error) console.error('Error bulk saving notifications in Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase exception bulk saving notifications:', err);
+    return false;
+  }
+}
+
+// LANDING CONFIG
+export async function fetchLandingConfigCloud(): Promise<any | null> {
+  try {
+    const { data, error } = await supabase
+      .from('landing_config')
+      .select('*')
+      .limit(1);
+    if (error || !data || data.length === 0) return null;
+    return data[0].config;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveLandingConfigCloud(config: any): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('landing_config')
+      .upsert({ id: 'LANDING_SINGLETON', config });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// CONTRACT TEMPLATES (CLOUD PERSISTENCE)
+export async function fetchContractTemplatesCloud(): Promise<ContractTemplate[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('contract_templates')
+      .select('*')
+      .order('id', { ascending: true });
+    if (error) {
+      console.warn('Error fetching contract templates from Supabase:', error);
+      return null;
+    }
+    return data as ContractTemplate[];
+  } catch (err) {
+    console.error('Supabase fetchContractTemplates exception:', err);
+    return null;
+  }
+}
+
+export async function bulkInsertContractTemplatesCloud(templates: ContractTemplate[]): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('contract_templates')
+      .upsert(templates);
+    if (error) console.error('Error bulk saving contract templates in Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase exception bulk saving contract templates:', err);
+    return false;
+  }
+}
+
+// TERMS AND CONDITIONS (CLOUD PERSISTENCE)
+export async function fetchTermsConditionsCloud(): Promise<TermsConditions | null> {
+  try {
+    const { data, error } = await supabase
+      .from('terms_conditions')
+      .select('*')
+      .eq('id', 'terms_singleton')
+      .limit(1);
+    
+    if (error) {
+      console.warn('Error fetching terms and conditions from Supabase:', error);
+      return null;
+    }
+    if (data && data.length > 0) {
+      return data[0] as TermsConditions;
+    }
+    return null;
+  } catch (err) {
+    console.error('Supabase fetchTermsConditions exception:', err);
+    return null;
+  }
+}
+
+export async function saveTermsConditionsCloud(terms: TermsConditions): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('terms_conditions')
+      .upsert(terms);
+    if (error) console.error('Error saving terms and conditions in Supabase:', error);
+    return !error;
+  } catch (err) {
+    console.error('Supabase exception saving terms and conditions:', err);
+    return false;
+  }
+}
+
+export async function deleteClientCloud(clientId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('clients')
+      .delete()
+      .eq('id', clientId);
+    return !error;
+  } catch (err) {
+    console.error('Error deleting client in Supabase:', err);
+    return false;
+  }
+}
+
+export async function deleteRequestCloud(requestId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('requests')
+      .delete()
+      .eq('id', requestId);
+    return !error;
+  } catch (err) {
+    console.error('Error deleting request in Supabase:', err);
+    return false;
+  }
+}
+
+export async function deleteDossierCloud(dossierId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('dossiers')
+      .delete()
+      .eq('id', dossierId);
+    return !error;
+  } catch (err) {
+    console.error('Error deleting dossier in Supabase:', err);
+    return false;
+  }
+}
+
+export async function deletePaymentCloud(paymentId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('client_payments')
+      .delete()
+      .eq('id', paymentId);
+    return !error;
+  } catch (err) {
+    console.error('Error deleting payment in Supabase:', err);
+    return false;
+  }
+}
+
+
+
+
